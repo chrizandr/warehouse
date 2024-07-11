@@ -1,8 +1,13 @@
 from data import Data
 from tqdm import tqdm
+import cvxpy as cp
 import numpy as np
 import xarray as xr
 from largest_gap import LG_Routing
+import warnings
+
+# Suppress all warnings
+warnings.filterwarnings("ignore")
 
 
 class SRRP:
@@ -31,8 +36,11 @@ class SRRP:
         self.T_dash = self.T + [len(self.T)+1]
 
         self.b = self.compute_b()
-        self.pi = self.compute_pi()
+        # self.pi = self.compute_pi()
         self.mu = self.compute_mu()
+
+        objective, vars = self.objective()
+        constraints = self.constraints(vars)
 
         self.process_cycle()
 
@@ -43,43 +51,42 @@ class SRRP:
                           dims=["i", "t"])
         for i in tqdm(self.M):
             for t in self.T:
-                Ui_val = self.U.sel(i=i)
-                bikt_slice = self.b.sel(i=i, t=t)
-
+                Ui_val = self.U.loc[i].item()
+                bikt_slice = self.b.loc[i, : , t]
                 mask_val = bikt_slice <= Ui_val
                 mask_range = (self.b.coords['k'] >= 0) & (self.b.coords['k'] <= t-1)
                 mask = mask_range & mask_val
 
                 filled_bikt = xr.where(mask, bikt_slice, np.inf)
 
-                min_k_index = filled_bikt.argmin(dim='k')
-
-                if np.isfinite(filled_bikt.isel(k=min_k_index).item()):
+                min_k_index = int(filled_bikt.idxmin(dim='k').item())
+                if np.isfinite(filled_bikt.sel(k=min_k_index).item()):
                     pi.loc[{'i': i, 't': t}] = min_k_index
+                else:
+                    raise ValueError("Demand is greater than capacity")
         return pi
 
     def compute_mu(self):
-        mu = xr.DataArray(np.nan * np.ones((len(self.M), len(self.T_dash))),
-                          coords=[self.M, self.T_dash],
+        mu = xr.DataArray(np.nan * np.ones((len(self.M), len(self.T_star))),
+                          coords=[self.M, self.T_star],
                           dims=["i", "t"])
         for i in tqdm(self.M):
-            for t in self.T:
-                Ui_val = self.U.sel(i=i)
-                bikt_slice = self.b.sel(i=i, k=t)
-
-                mask_val = bikt_slice <= Ui_val
+            for t in self.T_star:
+                Ui_val = self.U.loc[i].item()
+                bitk = self.b.loc[i, t, :]
+                mask_val = bitk <= Ui_val
                 mask_range = (self.b.coords['t'] >= t+1) & (self.b.coords['t'] <= self.T_dash[-1])
                 mask = mask_range & mask_val
 
-                filled_bikt = xr.where(mask, bikt_slice, -1*np.inf)
+                filled_bikt = xr.where(mask, bitk, -1 * np.inf)
 
-                max_k_index = filled_bikt.argmax(dim='t')
-                # if max_k_index.item() == 0:
-                #     breakpoint()
+                max_k_index = int(filled_bikt.idxmax(dim='t').item())
 
-                if np.isfinite(filled_bikt.isel(t=max_k_index).item()):
+                if np.isfinite(filled_bikt.sel(t=max_k_index).item()):
                     mu.loc[{'i': i, 't': t}] = max_k_index
-
+                else:
+                    raise ValueError("Something went wrong")
+        breakpoint()
         return mu
 
 
@@ -89,12 +96,13 @@ class SRRP:
                          dims=["i", "k", "t"])
 
         for t in self.T_dash:
-            b.loc[:, 0, t] = self.U.loc[:] - self.I_init.loc[:] + self.r.loc[:, 1:t].sum(axis=1)
+            indices = list(range(1, t))
+            b.loc[:, 0, t] = self.U.loc[:] - self.I_init.loc[:] + self.r.loc[:, indices].sum(axis=1)
 
         for k in self.T:
             for t in self.T_dash:
-                b.loc[:, k, t] = self.r.loc[:, k:t].sum(axis=1)
-
+                indices = list(range(k, t))
+                b.loc[:, k, t] = self.r.loc[:, indices].sum(axis=1)
         return b
 
 
@@ -111,6 +119,56 @@ class SRRP:
             alpha[slot] = [0] + [x + 1 for x in route[0:i]]
             beta[slot] = [x + 1 for x in route[i::]] + [0]
         return alpha, beta
+
+    def objective(self):
+        # Define the predefined sets
+        shape_w = (len(self.M), len(self.T_star))
+        shape_y = (len(self.M_dash), len(self.M_dash))
+
+        w, y = {}, {}
+        for t in self.T_dash:
+            w[t] = cp.Variable(shape_w, boolean=True)
+
+        for t in self.T:
+            y[t] = cp.Variable(shape_y, boolean=True)
+
+        objective_sum = []
+        for t in self.T:
+            objective_sum.append(self.t.values * y[t])
+
+        objective = cp.Minimize(cp.sum(sum(objective_sum)))
+        return objective, (w, y)
+
+    def constraints(self, objective_variables):
+
+        w, y = objective_variables
+        constraints = []
+
+        I_dash = {1: self.I_dash_init.values}
+
+        for t in self.T:
+            S = cp.multiply(w[t], self.b.loc[:, :, t].values)
+            summations = []
+            for i in self.M:
+                bound = self.pi.loc[i, t], t-1
+                if bound[0]:
+                    pass
+                summations.append(cp.sum(S[i, bound[0]-1: bound[1]]))
+            breakpoint()
+            s = cp.vstack(summations)
+            I_dash[t+1] = I_dash[t] + self.p.loc[:, t] - self.pi.loc[:, t]
+
+
+
+
+
+
+    def solve(self, objective, constraints, variables):
+        problem = cp.Problem(objective, constraints)
+        solver = cp.GLPK_MI  # Change this to cp.CBC or cp.GUROBI as needed
+        problem.solve(solver=solver, verbose=True)
+
+
 
 
 if __name__ == "__main__":
