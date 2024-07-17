@@ -35,17 +35,21 @@ class SRRP:
         self.T_star = [0] + self.T
         self.T_dash = self.T + [len(self.T)+1]
 
-        self.b = self.compute_b()
-        # self.pi = self.compute_pi()
-        self.mu = self.compute_mu()
-
+        self.b = self.compute_b(load_from="vars/b.nc")
+        self.pi = self.compute_pi(load_from="vars/pi.nc")
+        self.mu = self.compute_mu(load_from="vars/mu.nc")
         objective, vars = self.objective()
         constraints = self.constraints(vars)
+        breakpoint()
 
         self.process_cycle()
 
 
-    def compute_pi(self):
+    def compute_pi(self, load_from=None, save_to=None):
+        if load_from:
+            pi = xr.open_dataarray(load_from)
+            return pi
+
         pi = xr.DataArray(np.nan * np.ones((len(self.M), len(self.T))),
                           coords=[self.M, self.T],
                           dims=["i", "t"])
@@ -64,9 +68,16 @@ class SRRP:
                     pi.loc[{'i': i, 't': t}] = min_k_index
                 else:
                     raise ValueError("Demand is greater than capacity")
+        if save_to:
+            pi.to_netcdf(save_to)
+
         return pi
 
-    def compute_mu(self):
+    def compute_mu(self, load_from=None, save_to=None):
+        if load_from:
+            mu = xr.open_dataarray(load_from)
+            return mu
+
         mu = xr.DataArray(np.nan * np.ones((len(self.M), len(self.T_star))),
                           coords=[self.M, self.T_star],
                           dims=["i", "t"])
@@ -86,11 +97,17 @@ class SRRP:
                     mu.loc[{'i': i, 't': t}] = max_k_index
                 else:
                     raise ValueError("Something went wrong")
-        breakpoint()
+
+        if save_to:
+            mu.to_netcdf(save_to)
         return mu
 
 
-    def compute_b(self):
+    def compute_b(self, load_from=None, save_to=None):
+        if load_from:
+            b = xr.open_dataarray(load_from)
+            return b
+
         b = xr.DataArray(np.zeros((len(self.M), len(self.T_star), len(self.T_dash))),
                          coords=[self.M, self.T_star, self.T_dash],
                          dims=["i", "k", "t"])
@@ -103,6 +120,10 @@ class SRRP:
             for t in self.T_dash:
                 indices = list(range(k, t))
                 b.loc[:, k, t] = self.r.loc[:, indices].sum(axis=1)
+
+        if save_to:
+            b.to_netcdf(save_to)
+
         return b
 
 
@@ -124,6 +145,7 @@ class SRRP:
         # Define the predefined sets
         shape_w = (len(self.M), len(self.T_star))
         shape_y = (len(self.M_dash), len(self.M_dash))
+        shape_z = (len(self.M_dash), len(self.T))
 
         w, y = {}, {}
         for t in self.T_dash:
@@ -132,31 +154,74 @@ class SRRP:
         for t in self.T:
             y[t] = cp.Variable(shape_y, boolean=True)
 
+        z = cp.Variable(shape_z, boolean=True)
+
         objective_sum = []
         for t in self.T:
             objective_sum.append(self.t.values * y[t])
 
         objective = cp.Minimize(cp.sum(sum(objective_sum)))
-        return objective, (w, y)
+
+        return objective, (w, y, z)
 
     def constraints(self, objective_variables):
+        constraints = []
+        c, v = self.constraints_22_to_24_and_37(objective_variables)
+        constraints += c
+        c, v = self.constraints_25_to_28(objective_variables, v)
+        constraints += c
 
-        w, y = objective_variables
+    def constraints_22_to_24_and_37(self, objective_variables):
+        w, y, z = objective_variables
         constraints = []
 
-        I_dash = {1: self.I_dash_init.values}
+        I_dash = {1: self.I_dash_init.values[:, None]}
+        I = {1: self.I_init.values[:, None]}
 
-        for t in self.T:
+        for t in tqdm(self.T):
             S = cp.multiply(w[t], self.b.loc[:, :, t].values)
+
             summations = []
             for i in self.M:
-                bound = self.pi.loc[i, t], t-1
-                if bound[0]:
-                    pass
-                summations.append(cp.sum(S[i, bound[0]-1: bound[1]]))
-            breakpoint()
+                indices = range(int(self.pi.loc[i, t].item()), t)
+                summations.append(cp.sum(S[i-1, indices]))
+
             s = cp.vstack(summations)
-            I_dash[t+1] = I_dash[t] + self.p.loc[:, t] - self.pi.loc[:, t]
+
+            # constraint (22)
+            I_dash[t+1] = I_dash[t] + self.p.loc[:, t].values[:, None] - s
+            # constraint (23)
+            constraints.append(I_dash[t] >= s)
+            # constraint (24)
+            I[t+1] = I[t] + s - self.r.loc[:, t].values[:, None]
+
+        for t in self.T_dash:
+            if t >= 2:
+                # constraint (37)
+                constraints.append(I[t] >= 0)
+                constraints.append(I_dash[t] >= 0)
+
+        return constraints, (I, I_dash)
+
+    def constraints_25_to_28(self, objective_variables, intermediate_variables):
+        w, y, z = objective_variables
+        I, I_dash = intermediate_variables
+        constraints = []
+
+
+        # 25
+        summations = []
+        for i in self.M:
+            k_range = range(1, int(self.mu.loc[i, 0].item()) + 1)
+            summations.append(cp.sum([w[k][i - 1, 0] for k in k_range]))
+
+        constraints += [cp.sum(summations) == 1]
+
+
+
+
+
+
 
 
 
