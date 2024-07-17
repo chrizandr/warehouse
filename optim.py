@@ -27,10 +27,8 @@ console_handler.setLevel(logging.DEBUG)
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
-
-
-class SRRP:
-    def __init__(self, dataset, router=LG_Routing) -> None:
+class Parameters:
+    def __init__(self, dataset) -> None:
 
         self.M = list(range(1, dataset.num_items + 1))
         self.M_dash = [0] + self.M
@@ -58,12 +56,6 @@ class SRRP:
         self.b = self.compute_b(cache="vars/b.nc")
         self.pi = self.compute_pi(cache="vars/pi.nc")
         self.mu = self.compute_mu(cache="vars/mu.nc")
-        objective, vars = self.objective()
-        constraints = self.constraints(vars)
-        breakpoint()
-
-        self.process_cycle()
-
 
     def compute_pi(self, cache=None):
         logger.debug("Computing [pi]")
@@ -156,11 +148,22 @@ class SRRP:
 
         return b
 
+
+class SRRP:
+    def __init__(self, dataset, router=LG_Routing) -> None:
+        self.params = Parameters(dataset)
+
+        objective, vars = self.objective()
+        constraints = self.constraints(vars)
+        breakpoint()
+
+        self.process_cycle()
+
+
     def process_cycle(self, apriori_route):
         for i in range(len(self.T)):
             self.apriori_route = apriori_route
             self.aplha, self.beta = self.process_route(apriori_route)
-
 
     def process_route(self, route):
         alpha = {}
@@ -173,22 +176,22 @@ class SRRP:
     def objective(self):
         logger.debug("Constructing [Objective]")
         # Define the predefined sets
-        shape_w = (len(self.M), len(self.T_star))
-        shape_y = (len(self.M_dash), len(self.M_dash))
-        shape_z = (len(self.M_dash), len(self.T))
+        shape_w = (len(self.params.M), len(self.params.T_star))
+        shape_y = (len(self.params.M_dash), len(self.params.M_dash))
+        shape_z = (len(self.params.M_dash), len(self.params.T))
 
         w, y = {}, {}
-        for t in self.T_dash:
+        for t in self.params.T_dash:
             w[t] = cp.Variable(shape_w, boolean=True)
 
-        for t in self.T:
+        for t in self.params.T:
             y[t] = cp.Variable(shape_y, boolean=True)
 
         z = cp.Variable(shape_z, boolean=True)
 
         objective_sum = []
-        for t in self.T:
-            objective_sum.append(self.t.values * y[t])
+        for t in self.params.T:
+            objective_sum.append(self.params.t.values * y[t])
 
         objective = cp.Minimize(cp.sum(sum(objective_sum)))
 
@@ -209,28 +212,28 @@ class SRRP:
         w, y, z = objective_variables
         constraints = []
 
-        I_dash = {1: self.I_dash_init.values[:, None]}
-        I = {1: self.I_init.values[:, None]}
+        I_dash = {1: self.params.I_dash_init.values[:, None]}
+        I = {1: self.params.I_init.values[:, None]}
 
 
-        for t in tqdm(self.T):
-            S = cp.multiply(w[t], self.b.loc[:, :, t].values)
+        for t in tqdm(self.params.T):
+            S = cp.multiply(w[t], self.params.b.loc[:, :, t].values)
 
             summations = []
-            for i in self.M:
-                indices = range(int(self.pi.loc[i, t].item()), t)
+            for i in self.params.M:
+                indices = range(int(self.params.pi.loc[i, t].item()), t)
                 summations.append(cp.sum(S[i-1, indices]))
 
             s = cp.vstack(summations)
 
             # constraint (22)
-            I_dash[t+1] = I_dash[t] + self.p.loc[:, t].values[:, None] - s
+            I_dash[t+1] = I_dash[t] + self.params.p.loc[:, t].values[:, None] - s
             # constraint (23)
             constraints.append(I_dash[t] >= s)
             # constraint (24)
-            I[t+1] = I[t] + s - self.r.loc[:, t].values[:, None]
+            I[t+1] = I[t] + s - self.params.r.loc[:, t].values[:, None]
 
-        for t in self.T_dash:
+        for t in self.params.T_dash:
             if t >= 2:
                 # constraint (37)
                 constraints.append(I[t] >= 0)
@@ -245,8 +248,8 @@ class SRRP:
 
         # constraint (25)
         summations = []
-        for i in self.M:
-            k_range = range(1, int(self.mu.loc[i, 0].item()) + 1)
+        for i in self.params.M:
+            k_range = range(1, int(self.params.mu.loc[i, 0].item()) + 1)
             summations.append(cp.sum([w[k][i - 1, 0] for k in k_range]))
 
         constraints += [cp.sum(summations) == 1]
@@ -254,11 +257,11 @@ class SRRP:
 
         # TODO: Check indices and stack the subtractions to reduce number of constraints
         # constraint (26)
-        for t in tqdm(self.T):
+        for t in tqdm(self.params.T):
             a_s, b_s = [], []
-            for i in self.M:
-                k_range_1 = range(t+1, int(self.mu.loc[i, t].item()) + 1)
-                k_range_2 = range(int(self.pi.loc[i, t].item()), t)
+            for i in self.params.M:
+                k_range_1 = range(t+1, int(self.params.mu.loc[i, t].item()) + 1)
+                k_range_2 = range(int(self.params.pi.loc[i, t].item()), t)
 
                 a = cp.sum([w[k][i-1, t] for k in k_range_1])
                 b = cp.sum([w[t][i-1, k] for k in k_range_2])
@@ -268,17 +271,6 @@ class SRRP:
             constraints += [A - B == 0]
         return constraints, (I, I_dash)
         breakpoint()
-
-
-
-
-
-
-
-
-
-
-
 
     def solve(self, objective, constraints, variables):
         problem = cp.Problem(objective, constraints)
