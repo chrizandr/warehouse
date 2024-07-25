@@ -29,6 +29,8 @@ logger.addHandler(console_handler)
 
 class Parameters:
     def __init__(self, dataset) -> None:
+        self.num_aisles = 15
+        self.num_per_row = 15
 
         self.M = list(range(1, dataset.num_items + 1))
         self.M_dash = [0] + self.M
@@ -65,9 +67,10 @@ class Parameters:
             pi = xr.open_dataarray(cache)
             return pi
 
-        pi = xr.DataArray(np.nan * np.ones((len(self.M), len(self.T))),
-                          coords=[self.M, self.T],
-                          dims=["i", "t"])
+        pi = xr.DataArray(
+            np.nan * np.ones((len(self.M), len(self.T))),
+            coords=[self.M, self.T],
+            dims=["i", "t"])
         for i in tqdm(self.M):
             for t in self.T:
                 Ui_val = self.U.loc[i].item()
@@ -97,9 +100,10 @@ class Parameters:
             mu = xr.open_dataarray(cache)
             return mu
 
-        mu = xr.DataArray(np.nan * np.ones((len(self.M), len(self.T_star))),
-                          coords=[self.M, self.T_star],
-                          dims=["i", "t"])
+        mu = xr.DataArray(
+            np.nan * np.ones((len(self.M), len(self.T_star))),
+            coords=[self.M, self.T_star],
+            dims=["i", "t"])
         for i in tqdm(self.M):
             for t in self.T_star:
                 Ui_val = self.U.loc[i].item()
@@ -130,9 +134,10 @@ class Parameters:
             b = xr.open_dataarray(cache)
             return b
 
-        b = xr.DataArray(np.zeros((len(self.M), len(self.T_star), len(self.T_dash))),
-                         coords=[self.M, self.T_star, self.T_dash],
-                         dims=["i", "k", "t"])
+        b = xr.DataArray(
+            np.zeros((len(self.M), len(self.T_star), len(self.T_dash))),
+            coords=[self.M, self.T_star, self.T_dash],
+            dims=["i", "k", "t"])
 
         for t in self.T_dash:
             indices = list(range(1, t))
@@ -152,25 +157,28 @@ class Parameters:
 class SRRP:
     def __init__(self, dataset, router=LG_Routing) -> None:
         self.params = Parameters(dataset)
+        self.router = router(
+            num_aisles=self.params.num_aisles,
+            num_per_row=self.params.num_per_row,
+            distance_matrix=dataset.distances
+        )
+        logger.debug("Computing the priori route")
+        min_cost, apriori_route = self.router.optimize([x-1 for x in self.params.M])
+        apriori_route = [0] + [x+1 for x in apriori_route] + [0]
+
+        self.alpha, self.beta = self.process_route(apriori_route)
 
         objective, vars = self.objective()
         constraints = self.constraints(vars)
         breakpoint()
 
-        self.process_cycle()
-
-
-    def process_cycle(self, apriori_route):
-        for i in range(len(self.T)):
-            self.apriori_route = apriori_route
-            self.aplha, self.beta = self.process_route(apriori_route)
-
     def process_route(self, route):
+        logger.debug("Computing [alpha] and [beta]")
         alpha = {}
         beta = {}
-        for i, slot in enumerate(route):
-            alpha[slot] = [0] + [x + 1 for x in route[0:i]]
-            beta[slot] = [x + 1 for x in route[i::]] + [0]
+        for i, slot in enumerate(tqdm(route)):
+            alpha[slot] = [x for x in route[0:i]]
+            beta[slot] = [x for x in route[i::]]
         return alpha, beta
 
     def objective(self):
@@ -201,14 +209,23 @@ class SRRP:
     def constraints(self, objective_variables):
         logger.debug("Constructing [Constraints]")
         constraints = []
-        c, v = self.constraints_22_to_24_and_37(objective_variables)
+        c, v = self.inventory_constraints(objective_variables)
         logger.debug(f"Added {len(c)} new constraints")
         constraints += c
-        c, v = self.constraints_25_to_28(objective_variables, v)
+        c, v = self.w_constraints(objective_variables, v)
+        logger.debug(f"Added {len(c)} new constraints")
+        constraints += c
+        c, v = self.z_constraints(objective_variables, v)
+        logger.debug(f"Added {len(c)} new constraints")
+        constraints += c
+        c, v = self.warehouse_constraints(objective_variables, v)
         logger.debug(f"Added {len(c)} new constraints")
         constraints += c
 
-    def constraints_22_to_24_and_37(self, objective_variables):
+        logger.debug("[Constraints] Constructed")
+
+    def inventory_constraints(self, objective_variables):
+        logger.debug(f"Building [inventory] constraints")
         w, y, z = objective_variables
         constraints = []
 
@@ -241,21 +258,20 @@ class SRRP:
 
         return constraints, (I, I_dash)
 
-    def constraints_25_to_28(self, objective_variables, intermediate_variables):
+    def w_constraints(self, objective_variables, intermediate_variables):
+        logger.debug(f"Building constraints on [w]")
         w, y, z = objective_variables
         I, I_dash = intermediate_variables
         constraints = []
 
         # constraint (25)
         summations = []
-        for i in self.params.M:
+        for i in tqdm(self.params.M):
             k_range = range(1, int(self.params.mu.loc[i, 0].item()) + 1)
             summations.append(cp.sum([w[k][i - 1, 0] for k in k_range]))
 
         constraints += [cp.sum(summations) == 1]
 
-
-        # TODO: Check indices and stack the subtractions to reduce number of constraints
         # constraint (26)
         for t in tqdm(self.params.T):
             a_s, b_s = [], []
@@ -269,25 +285,107 @@ class SRRP:
 
             A, B = cp.vstack(a_s), cp.vstack(b_s)
             constraints += [A - B == 0]
+
+        # constraint (27)
+        w_sums = []
+        for i in tqdm(self.params.M):
+            k_range = range(int(self.params.pi.loc[i, self.params.T[-1]].item()), self.params.T[-1]+1)
+            w_sum = cp.sum([w[self.params.T_dash[-1]][i-1, k] for k in k_range])
+            w_sums.append(w_sum)
+        W = cp.vstack(w_sums)
+        constraints += [W == 1]
+
+
+        # constraint (28)
+        for t in tqdm(self.params.T):
+            w_s, z_s = [], []
+            for i in self.params.M:
+                k_range = range(int(self.params.pi.loc[i, t].item()), t)
+                w_s.append(cp.sum([w[t][i-1, k] for k in k_range]))
+                z_s.append(z[i, t-1])
+            W = cp.vstack(w_s)
+            Z = cp.vstack(z_s)
+            constraints += [W == Z]
+
         return constraints, (I, I_dash)
-        breakpoint()
+
+    def z_constraints(self, objective_variables, intermediate_variables):
+        logger.debug(f"Building constraints on [z]")
+        w, y, z = objective_variables
+        I, I_dash = intermediate_variables
+        constraints = []
+
+        # constraint (29)
+        for t in tqdm(self.params.T):
+            z_s = []
+            for i in self.params.M:
+                z_s.append(z[i, t-1])
+            constraints += [cp.vstack(z_s) <= z[0, t-1]]
+
+        # constraint (30)
+        for t in tqdm(self.params.T):
+            y_s = []
+            z_s = []
+            for i in self.params.M_dash:
+                y_s.append(cp.sum([y[t][i, j] for j in self.beta[i]]))
+                z_s.append(z[i, t - 1])
+
+            if len(y_s) > 0:
+                Y = cp.vstack(y_s)
+                Z = cp.vstack(z_s)
+                constraints += [Y == Z]
+
+        # constraint (31)
+        for t in tqdm(self.params.T):
+            y_s = []
+            z_s = []
+            for i in self.params.M_dash:
+                y_s.append(cp.sum([y[t][j, i] for j in self.alpha[i]]))
+                z_s.append(z[i, t - 1])
+
+            if len(y_s) > 0:
+                Y = cp.vstack(y_s)
+                Z = cp.vstack(z_s)
+                constraints += [Y == Z]
+
+        return constraints, (I, I_dash)
+
+    def warehouse_constraints(self, objective_variables, intermediate_variables):
+        logger.debug(f"Building constraints on [warehouse limits]")
+        w, y, z = objective_variables
+        I, I_dash = intermediate_variables
+        constraints = []
+
+        # constraint (32)
+        for t in tqdm(self.params.T):
+            sum_s = []
+            for i in self.params.M_dash:
+                sum_s.append(cp.sum(self.params.t[i, ::].values * y[t][i, ::]))
+            constraints += [cp.sum(sum_s) <= self.params.L]
+
+        # constraint (33)
+        for t in tqdm(self.params.T):
+            sum_s = []
+            for i in self.params.M:
+                k_range = [x for x in range(int(self.params.pi.loc[i, t].item()), t)]
+                sum_s.append(cp.sum(self.params.b.loc[i, k_range, t].values * w[t][i-1, k_range]))
+            constraints += [cp.sum(sum_s) <= self.params.Q]
+
+        return constraints, (I, I_dash)
 
     def solve(self, objective, constraints, variables):
         problem = cp.Problem(objective, constraints)
-        solver = cp.GLPK_MI  # Change this to cp.CBC or cp.GUROBI as needed
+        solver = cp.CBC  # Change this to cp.CBC or cp.GUROBI as needed
         problem.solve(solver=solver, verbose=True)
 
 
-
-
 if __name__ == "__main__":
-    num_aisles = 15
-    num_per_row = 15
-    file_path = "/data/chris/warehouse/data/Large instances/300 items per cycle, uniform demand/450-15_inst0001.txt"
+
+    file_path = "/Users/chris/couture/warehouse/warehouse/data/Large instances/300 items per cycle, uniform demand/450-15_inst0001.txt"
     dataset = Data(file_path)
-    tsp = LG_Routing(
-        num_aisles=num_aisles,
-        num_per_row=num_per_row,
-        distance_matrix=dataset.distances
-    )
+    # tsp = LG_Routing(
+    #     num_aisles=num_aisles,
+    #     num_per_row=num_per_row,
+    #     distance_matrix=dataset.distances
+    # )
     optim = SRRP(dataset)

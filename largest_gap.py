@@ -51,7 +51,7 @@ class LG_Routing:
 
         split_aisles = [[list(), list()] for _ in range(self.num_aisles)]
 
-        for i, aisle in enumerate(aisles):
+        for i, aisle in enumerate(tqdm(aisles)):
             sorted_slots = sorted(aisle, key= lambda x:x[2])
 
             if len(sorted_slots) == 0:
@@ -142,7 +142,7 @@ if __name__ == "__main__":
     cost_in_aisle = 0
     cost_across_aisle = 1
     cost_adjacent_slot = 1
-    data_file = "/data/chris/warehouse/data/Large instances/300 items per cycle, uniform demand/450-15_inst0001.txt"
+    data_file = "/Users/chris/couture/warehouse/warehouse/data/Large instances/300 items per cycle, uniform demand/450-15_inst0001.txt"
 
     dataset = Data(data_file)
 
@@ -173,6 +173,7 @@ if __name__ == "__main__":
     routes = []
     for cycle in range(dataset.forward_cycle.shape[1]):
         cycle_demand = dataset.forward_cycle[::, cycle].nonzero()[0].tolist()
+        breakpoint()
         min_cost, min_tour = tsp.optimize(cycle_demand)
         routes.append((min_cost, min_tour))
     breakpoint()
