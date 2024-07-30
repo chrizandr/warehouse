@@ -406,7 +406,7 @@ class SRRP:
     def solve(self, objective, constraints):
         breakpoint()
         problem = cp.Problem(objective, constraints)
-        solver = cp.CBC  # Change this to cp.CBC or cp.GUROBI as needed
+        solver = cp.GLPK_MI  # Change this to cp.CBC or cp.GUROBI as needed
         problem.solve(solver=solver, verbose=True)
 
 
