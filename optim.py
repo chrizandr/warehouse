@@ -406,13 +406,13 @@ class SRRP:
     def solve(self, objective, constraints):
         breakpoint()
         problem = cp.Problem(objective, constraints)
-        solver = cp.CBC  # Change this to cp.CBC or cp.GUROBI as needed
+        solver = cp.GLPK_MI  # Change this to cp.CBC or cp.GUROBI as needed
         problem.solve(solver=solver, verbose=True)
-
+        breakpoint()
 
 if __name__ == "__main__":
 
-    file_path = "/Users/chris/couture/warehouse/warehouse/data/Large instances/25 items per cycle, 20-40 demand/450-15_inst0001.txt"
+    file_path = "/home/ubuntu/warehouse/data/Large instances/25 items per cycle, 20-40 demand/450-15_inst0001.txt"
     dataset = Data(file_path)
     # tsp = LG_Routing(
     #     num_aisles=num_aisles,
