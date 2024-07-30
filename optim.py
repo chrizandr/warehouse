@@ -27,6 +27,7 @@ console_handler.setLevel(logging.DEBUG)
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
+
 class Parameters:
     def __init__(self, dataset) -> None:
         self.num_aisles = 15
@@ -162,23 +163,33 @@ class SRRP:
             num_per_row=self.params.num_per_row,
             distance_matrix=dataset.distances
         )
-        logger.debug("Computing the priori route")
-        min_cost, apriori_route = self.router.optimize([x-1 for x in self.params.M])
-        apriori_route = [0] + [x+1 for x in apriori_route] + [0]
 
-        self.alpha, self.beta = self.process_route(apriori_route)
-
+        self.alpha, self.beta = self.apriori_route()
         objective, vars = self.objective()
         constraints = self.constraints(vars)
-        breakpoint()
+        self.solve(objective, constraints)
 
-    def process_route(self, route):
+    def apriori_route(self):
         logger.debug("Computing [alpha] and [beta]")
+
+        logger.debug("Computing the priori route")
+
+        demand_slots = set()
+        for t in self.params.T:
+            non_zero_slots = self.params.r.loc[::, t]
+            indices = (non_zero_slots != 0).values.nonzero()[0] + 1
+            demand_slots = demand_slots.union(set(indices.tolist()))
+        demand_slots = list(demand_slots)
+
+        min_cost, apriori_route = self.router.optimize(
+            [x-1 for x in demand_slots])
+        apriori_route = [0] + [x+1 for x in apriori_route]
         alpha = {}
         beta = {}
-        for i, slot in enumerate(tqdm(route)):
-            alpha[slot] = [x for x in route[0:i]]
-            beta[slot] = [x for x in route[i::]]
+        for i, slot in enumerate(tqdm(apriori_route)):
+            alpha[slot] = [x for x in apriori_route[0:i]]
+            beta[slot] = [x for x in apriori_route[i::]]
+
         return alpha, beta
 
     def objective(self):
@@ -192,6 +203,12 @@ class SRRP:
         for t in self.params.T_dash:
             w[t] = cp.Variable(shape_w, boolean=True)
 
+        w_mask = np.zeros((len(self.params.T_dash), shape_w[0], shape_w[1]))
+        for t in tqdm(self.params.T):
+            for i in self.params.M:
+                k_s = [x for x in range(int(self.params.pi.loc[i, t].item()), t)]
+                w_mask[t-1, i-1, k_s] = 1
+
         for t in self.params.T:
             y[t] = cp.Variable(shape_y, boolean=True)
 
@@ -204,7 +221,7 @@ class SRRP:
         objective = cp.Minimize(cp.sum(sum(objective_sum)))
 
         logger.debug("[Objective] constructed")
-        return objective, (w, y, z)
+        return objective, (w, y, z, w_mask)
 
     def constraints(self, objective_variables):
         logger.debug("Constructing [Constraints]")
@@ -226,13 +243,14 @@ class SRRP:
 
     def inventory_constraints(self, objective_variables):
         logger.debug(f"Building [inventory] constraints")
-        w, y, z = objective_variables
+        w, y, z, w_mask = objective_variables
         constraints = []
 
         I_dash = {1: self.params.I_dash_init.values[:, None]}
         I = {1: self.params.I_init.values[:, None]}
 
-
+        # constraint (22) and (23) and (24)
+        logger.debug(f"Constraint [22] and [23] and [24]")
         for t in tqdm(self.params.T):
             S = cp.multiply(w[t], self.params.b.loc[:, :, t].values)
 
@@ -250,9 +268,10 @@ class SRRP:
             # constraint (24)
             I[t+1] = I[t] + s - self.params.r.loc[:, t].values[:, None]
 
+        # constraint (37)
+        logger.debug(f"Constraint [37]")
         for t in self.params.T_dash:
             if t >= 2:
-                # constraint (37)
                 constraints.append(I[t] >= 0)
                 constraints.append(I_dash[t] >= 0)
 
@@ -260,11 +279,12 @@ class SRRP:
 
     def w_constraints(self, objective_variables, intermediate_variables):
         logger.debug(f"Building constraints on [w]")
-        w, y, z = objective_variables
+        w, y, z, w_mask = objective_variables
         I, I_dash = intermediate_variables
         constraints = []
 
         # constraint (25)
+        logger.debug(f"Constraint [25]")
         summations = []
         for i in tqdm(self.params.M):
             k_range = range(1, int(self.params.mu.loc[i, 0].item()) + 1)
@@ -273,6 +293,7 @@ class SRRP:
         constraints += [cp.sum(summations) == 1]
 
         # constraint (26)
+        logger.debug(f"Constraint [26]")
         for t in tqdm(self.params.T):
             a_s, b_s = [], []
             for i in self.params.M:
@@ -287,6 +308,7 @@ class SRRP:
             constraints += [A - B == 0]
 
         # constraint (27)
+        logger.debug(f"Constraint [27]")
         w_sums = []
         for i in tqdm(self.params.M):
             k_range = range(int(self.params.pi.loc[i, self.params.T[-1]].item()), self.params.T[-1]+1)
@@ -297,6 +319,7 @@ class SRRP:
 
 
         # constraint (28)
+        logger.debug(f"Constraint [28]")
         for t in tqdm(self.params.T):
             w_s, z_s = [], []
             for i in self.params.M:
@@ -311,11 +334,12 @@ class SRRP:
 
     def z_constraints(self, objective_variables, intermediate_variables):
         logger.debug(f"Building constraints on [z]")
-        w, y, z = objective_variables
+        w, y, z, w_mask = objective_variables
         I, I_dash = intermediate_variables
         constraints = []
 
         # constraint (29)
+        logger.debug(f"Constraint [29]")
         for t in tqdm(self.params.T):
             z_s = []
             for i in self.params.M:
@@ -323,12 +347,14 @@ class SRRP:
             constraints += [cp.vstack(z_s) <= z[0, t-1]]
 
         # constraint (30)
+        logger.debug(f"Constraint [30]")
         for t in tqdm(self.params.T):
             y_s = []
             z_s = []
             for i in self.params.M_dash:
-                y_s.append(cp.sum([y[t][i, j] for j in self.beta[i]]))
-                z_s.append(z[i, t - 1])
+                if i in self.beta:
+                    y_s.append(cp.sum([y[t][i, j] for j in self.beta[i]]))
+                    z_s.append(z[i, t - 1])
 
             if len(y_s) > 0:
                 Y = cp.vstack(y_s)
@@ -336,12 +362,14 @@ class SRRP:
                 constraints += [Y == Z]
 
         # constraint (31)
+        logger.debug(f"Constraint [31]")
         for t in tqdm(self.params.T):
             y_s = []
             z_s = []
             for i in self.params.M_dash:
-                y_s.append(cp.sum([y[t][j, i] for j in self.alpha[i]]))
-                z_s.append(z[i, t - 1])
+                if i in self.alpha:
+                    y_s.append(cp.sum([y[t][j, i] for j in self.alpha[i]]))
+                    z_s.append(z[i, t - 1])
 
             if len(y_s) > 0:
                 Y = cp.vstack(y_s)
@@ -352,11 +380,12 @@ class SRRP:
 
     def warehouse_constraints(self, objective_variables, intermediate_variables):
         logger.debug(f"Building constraints on [warehouse limits]")
-        w, y, z = objective_variables
+        w, y, z, w_mask = objective_variables
         I, I_dash = intermediate_variables
         constraints = []
 
         # constraint (32)
+        logger.debug(f"Constraint [32]")
         for t in tqdm(self.params.T):
             sum_s = []
             for i in self.params.M_dash:
@@ -364,6 +393,7 @@ class SRRP:
             constraints += [cp.sum(sum_s) <= self.params.L]
 
         # constraint (33)
+        logger.debug(f"Constraint [33]")
         for t in tqdm(self.params.T):
             sum_s = []
             for i in self.params.M:
@@ -373,7 +403,8 @@ class SRRP:
 
         return constraints, (I, I_dash)
 
-    def solve(self, objective, constraints, variables):
+    def solve(self, objective, constraints):
+        breakpoint()
         problem = cp.Problem(objective, constraints)
         solver = cp.CBC  # Change this to cp.CBC or cp.GUROBI as needed
         problem.solve(solver=solver, verbose=True)
@@ -381,7 +412,7 @@ class SRRP:
 
 if __name__ == "__main__":
 
-    file_path = "/Users/chris/couture/warehouse/warehouse/data/Large instances/300 items per cycle, uniform demand/450-15_inst0001.txt"
+    file_path = "/Users/chris/couture/warehouse/warehouse/data/Large instances/25 items per cycle, 20-40 demand/450-15_inst0001.txt"
     dataset = Data(file_path)
     # tsp = LG_Routing(
     #     num_aisles=num_aisles,
