@@ -56,9 +56,12 @@ class Parameters:
         self.T_dash = self.T + [len(self.T)+1]
 
         logger.debug("Computing parameters...")
-        self.b = self.compute_b(cache="vars/b.nc")
-        self.pi = self.compute_pi(cache="vars/pi.nc")
-        self.mu = self.compute_mu(cache="vars/mu.nc")
+        # self.b = self.compute_b(cache="vars/b.nc")
+        # self.pi = self.compute_pi(cache="vars/pi.nc")
+        # self.mu = self.compute_mu(cache="vars/mu.nc")
+        self.b = self.compute_b()
+        self.pi = self.compute_pi()
+        self.mu = self.compute_mu()
 
     def compute_pi(self, cache=None):
         logger.debug("Computing [pi]")
@@ -166,8 +169,8 @@ class SRRP:
 
         self.alpha, self.beta = self.apriori_route()
         objective, vars = self.objective()
-        constraints = self.constraints(vars)
-        self.solve(objective, constraints)
+        constraints, intermediate_vars = self.constraints(vars)
+        self.solve(objective, constraints, vars, intermediate_vars)
 
     def apriori_route(self):
         logger.debug("Computing [alpha] and [beta]")
@@ -240,6 +243,7 @@ class SRRP:
         constraints += c
 
         logger.debug("[Constraints] Constructed")
+        return constraints, v
 
     def inventory_constraints(self, objective_variables):
         logger.debug(f"Building [inventory] constraints")
@@ -400,19 +404,25 @@ class SRRP:
                 k_range = [x for x in range(int(self.params.pi.loc[i, t].item()), t)]
                 sum_s.append(cp.sum(self.params.b.loc[i, k_range, t].values * w[t][i-1, k_range]))
             constraints += [cp.sum(sum_s) <= self.params.Q]
-
         return constraints, (I, I_dash)
 
-    def solve(self, objective, constraints):
-        breakpoint()
+    def solve(self, objective, constraints, vars, intermediate_vars):
+        w, y, z, w_mask = vars
+        I, I_dash = intermediate_vars
+        # breakpoint()
+        logger.debug(f"Total number of constraints: {len(constraints)}")
+        logger.debug("Beginning optimisation")
+
         problem = cp.Problem(objective, constraints)
-        solver = cp.GLPK_MI  # Change this to cp.CBC or cp.GUROBI as needed
+        solver = cp.GLPK_MI  # Change this to cp.CBC or cp.GLPK_MI as needed
         problem.solve(solver=solver, verbose=True)
         breakpoint()
 
+
 if __name__ == "__main__":
 
-    file_path = "/home/ubuntu/warehouse/data/Large instances/25 items per cycle, 20-40 demand/450-15_inst0001.txt"
+    # file_path = "/home/ubuntu/warehouse/data/Large instances/25 items per cycle, 20-40 demand/450-15_inst0001.txt"
+    file_path = "/home/ubuntu/warehouse/data/Small instances/i25-t03-01.dat"
     dataset = Data(file_path)
     # tsp = LG_Routing(
     #     num_aisles=num_aisles,

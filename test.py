@@ -33,7 +33,7 @@ constraints = [fixed_X >= 0]
 # Define the problem
 problem = cp.Problem(objective, constraints)
 
-solver = cp.GLPK_MI  # Change this to cp.CBC or cp.GUROBI as needed
+solver = cp.CBC  # Change this to cp.CBC or cp.GUROBI as needed
 # Solve the problem
 problem.solve(solver=solver, verbose=True)
 
