@@ -5,6 +5,10 @@ cylp==0.92.2
 ecos==2.0.14
 h5netcdf==1.3.0
 h5py==3.11.0
+<<<<<<< HEAD
+=======
+numpy==2.0.1
+>>>>>>> 72571993eb21fdb4e69a8d5499242537dd639ac3
 osqp==0.6.7.post1
 packaging==24.1
 pandas==2.2.2
@@ -17,5 +21,9 @@ six==1.16.0
 tqdm==4.66.4
 tzdata==2024.1
 xarray==2024.7.0
+<<<<<<< HEAD
 # numpy==2.0.1
 numpy==1.26.4         # Use this for CBC
+=======
+
+>>>>>>> 72571993eb21fdb4e69a8d5499242537dd639ac3
